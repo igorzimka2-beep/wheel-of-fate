@@ -1,0 +1,21 @@
+# OS — Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# OS — macOS (in case of cross-machine work)
+.DS_Store
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Node (only if you later add tooling)
+node_modules/
+npm-debug.log*
+
+# Scratch
+*.tmp
+*.bak
