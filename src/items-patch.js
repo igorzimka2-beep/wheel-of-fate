@@ -2,6 +2,12 @@
 // Pool: Accessories/Support/Magical/Armor/Weapons/Armaments only,
 // final-form, > 2000g (boots & Essence Distiller exempt).
 // Rules per roll: 1 boots + (0-1) blink + others to 6, no duplicates.
+//
+// v2: adds a "Configure pool" panel. A gold button injected next to the
+// wheel opens a modal grid (Boots / Blinks / Others). Click an item icon to
+// toggle whether it can be rolled. Selection is in-memory only and resets to
+// "all enabled" on page reload (by design). Rolls draw only from enabled
+// items; guards keep at least one boots available so a roll never breaks.
 (function () {
   var BOOTS = [{n:"Phase Boots",s:"phase_boots"},{n:"Power Treads",s:"power_treads"},{n:"Boots of Travel",s:"travel_boots_2"},{n:"Boots of Bearing",s:"boots_of_bearing"},{n:"Guardian Greaves",s:"guardian_greaves"}];
   var BLINKS = [{n:"Swift Blink",s:"swift_blink"},{n:"Arcane Blink",s:"arcane_blink"},{n:"Overwhelming Blink",s:"overwhelming_blink"}];
@@ -21,91 +27,50 @@
   window.ITEM_SLUGS = SLUG_BY_NAME;
 
   var CDN = "https://cdn.cloudflare.steamstatic.com";
-
-  // --- Image URL override ---------------------------------------------------
-  // Forces canonical Steam CDN slugs regardless of dotaconstants name match.
-  // Handles React's render-order race where src is set before alt by deferring
-  // a re-check to a microtask after both attributes have been written.
-  function seedItemImages() {
-    var SLUG_URL = function (slug) {
-      return CDN + '/apps/dota2/images/dota_react/items/' + slug + '.png';
-    };
-
-    function tryFix(img) {
-      try {
-        var alt = img.getAttribute('alt');
-        if (!alt) return false;
-        var slug = SLUG_BY_NAME[alt];
-        if (!slug) return false;
-        var want = SLUG_URL(slug);
-        if (img.getAttribute('src') !== want) {
-          nativeSrcSet.call(img, want);
-        }
-        return true;
-      } catch (e) {
-        return false;
-      }
-    }
-
-    var imgProto = HTMLImageElement.prototype;
-    var srcDesc = Object.getOwnPropertyDescriptor(imgProto, 'src');
-    if (!srcDesc || !srcDesc.set) return;
-    var nativeSrcSet = srcDesc.set;
-    var nativeSrcGet = srcDesc.get;
-
-    Object.defineProperty(imgProto, 'src', {
-      configurable: true,
-      get: function () { return nativeSrcGet.call(this); },
-      set: function (v) {
-        if (typeof v === 'string' && v.indexOf('/dota_react/items/') !== -1) {
-          if (tryFix(this)) return;
-          nativeSrcSet.call(this, v);
-          var img = this;
-          Promise.resolve().then(function () { tryFix(img); });
-          return;
-        }
-        nativeSrcSet.call(this, v);
-      },
-    });
-
-    var origSetAttr = Element.prototype.setAttribute;
-    Element.prototype.setAttribute = function (name, value) {
-      var ret = origSetAttr.call(this, name, value);
-      if (this.tagName === 'IMG' && name === 'src'
-          && typeof value === 'string'
-          && value.indexOf('/dota_react/items/') !== -1) {
-        if (!tryFix(this)) {
-          var img = this;
-          Promise.resolve().then(function () { tryFix(img); });
-        }
-      }
-      if (this.tagName === 'IMG' && name === 'alt') tryFix(this);
-      return ret;
-    };
-
-    function fixAll() {
-      var imgs = document.querySelectorAll('img');
-      for (var i = 0; i < imgs.length; i++) tryFix(imgs[i]);
-    }
-    if (document.body) fixAll();
-    else document.addEventListener('DOMContentLoaded', fixAll);
+  function itemIconUrl(slug) {
+    return CDN + '/apps/dota2/images/dota_react/items/' + slug + '.png';
   }
-  // seedItemImages() is intentionally NOT called — see window.ITEM_SLUGS note
-  // above. The monkeypatch it installs caused item-icon swaps under React
-  // re-renders, and dotaconstants already provides correct item images.
 
-  // --- Roll: 1 boots + (0-1) blink + 4-5 others, no dupes, shuffled -------
+  // --- Enabled-pool state ---------------------------------------------------
+  // A Set of item names currently allowed to roll. Starts with everything on.
+  // In-memory only: reloading the page resets to all-enabled (by design).
+  var ENABLED = {};
+  function enableAll() {
+    ENABLED = {};
+    [BOOTS, BLINKS, OTHERS].forEach(function (arr) {
+      arr.forEach(function (it) { ENABLED[it.n] = true; });
+    });
+  }
+  enableAll();
+  window.ENABLED_ITEMS = ENABLED;
+
+  function enabledOf(arr) {
+    return arr.filter(function (it) { return ENABLED[it.n]; });
+  }
+
+  // --- Roll: 1 boots + (0-1) blink + 4-5 others, no dupes, shuffled --------
+  // Now draws only from ENABLED items. Guards:
+  //  - if all boots are disabled, fall back to the full boots list (a roll
+  //    must always contain exactly one boots), and flag it in the panel.
+  //  - if enabled others can't fill 6 slots, the roll just returns fewer.
   function rollItems() {
     var slots = [];
-    slots.push(BOOTS[Math.floor(Math.random() * BOOTS.length)].n);
-    if (Math.random() < 0.5) {
-      slots.push(BLINKS[Math.floor(Math.random() * BLINKS.length)].n);
+
+    var boots = enabledOf(BOOTS);
+    var bootsPool = boots.length ? boots : BOOTS; // never empty
+    slots.push(bootsPool[Math.floor(Math.random() * bootsPool.length)].n);
+
+    var blinks = enabledOf(BLINKS);
+    if (blinks.length && Math.random() < 0.5) {
+      slots.push(blinks[Math.floor(Math.random() * blinks.length)].n);
     }
-    var pool = OTHERS.slice();
+
+    var pool = enabledOf(OTHERS);
     while (slots.length < 6 && pool.length) {
       var idx = Math.floor(Math.random() * pool.length);
       slots.push(pool.splice(idx, 1)[0].n);
     }
+
     for (var i = slots.length - 1; i > 0; i--) {
       var j = Math.floor(Math.random() * (i + 1));
       var tmp = slots[i]; slots[i] = slots[j]; slots[j] = tmp;
@@ -128,11 +93,277 @@
   window.ITEMS = sentinel;
   window.rollItems = rollItems;
 
+  // ==========================================================================
+  // POOL SELECTOR PANEL
+  // ==========================================================================
+  // Self-contained UI: injects its own button, modal, and styles. Clicking an
+  // item icon toggles ENABLED[name]. Purely additive to the React app — it
+  // never touches the app's own render tree.
+
+  var PANEL_CSS = [
+    '.wof-pool-btn{',
+    '  display:inline-flex;align-items:center;gap:8px;cursor:pointer;',
+    '  font-family:inherit;font-size:0.95rem;letter-spacing:0.02em;',
+    '  padding:10px 18px;border-radius:10px;',
+    '  color:#e9d8a6;',
+    '  background:linear-gradient(180deg,rgba(34,18,88,0.6),rgba(17,8,48,0.6));',
+    '  border:1px solid rgba(200,170,120,0.35);',
+    '  transition:border-color .15s ease,transform .1s ease;',
+    '}',
+    '.wof-pool-btn:hover{border-color:rgba(230,205,140,0.75);}',
+    '.wof-pool-btn:active{transform:translateY(1px);}',
+
+    '.wof-overlay{',
+    '  position:fixed;inset:0;z-index:100000;',
+    '  background:rgba(7,4,26,0.72);backdrop-filter:blur(4px);',
+    '  display:flex;align-items:center;justify-content:center;padding:24px;',
+    '}',
+    '.wof-modal{',
+    '  width:min(920px,96vw);max-height:88vh;overflow:hidden;',
+    '  display:flex;flex-direction:column;',
+    '  background:linear-gradient(180deg,#160c38,#0d0726);',
+    '  border:1px solid rgba(200,170,120,0.3);border-radius:16px;',
+    '  box-shadow:0 24px 80px rgba(0,0,0,0.6);',
+    '  color:#ece6ff;font-family:inherit;',
+    '}',
+    '.wof-modal-head{',
+    '  display:flex;align-items:center;justify-content:space-between;',
+    '  padding:18px 22px;border-bottom:1px solid rgba(200,170,120,0.18);',
+    '}',
+    '.wof-modal-title{font-size:1.25rem;color:#e9d8a6;letter-spacing:0.03em;}',
+    '.wof-modal-sub{font-size:0.82rem;color:#9a8cc0;margin-top:2px;}',
+    '.wof-x{cursor:pointer;font-size:1.4rem;line-height:1;color:#9a8cc0;',
+    '  background:none;border:none;padding:6px 10px;border-radius:8px;}',
+    '.wof-x:hover{color:#fff;background:rgba(255,255,255,0.06);}',
+
+    '.wof-body{overflow-y:auto;padding:8px 22px 22px;}',
+    '.wof-section{margin-top:18px;}',
+    '.wof-section-head{',
+    '  display:flex;align-items:center;justify-content:space-between;',
+    '  margin-bottom:10px;',
+    '}',
+    '.wof-section-title{font-size:1rem;color:#c8b6ff;letter-spacing:0.04em;',
+    '  text-transform:uppercase;}',
+    '.wof-section-actions{display:flex;gap:6px;}',
+    '.wof-mini{cursor:pointer;font-size:0.72rem;padding:4px 10px;border-radius:6px;',
+    '  color:#c8b6ff;background:rgba(120,90,220,0.12);',
+    '  border:1px solid rgba(160,140,220,0.25);}',
+    '.wof-mini:hover{background:rgba(120,90,220,0.24);}',
+
+    '.wof-grid{',
+    '  display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));',
+    '  gap:8px;',
+    '}',
+    '.wof-item{',
+    '  position:relative;cursor:pointer;border-radius:8px;padding:6px 4px 5px;',
+    '  display:flex;flex-direction:column;align-items:center;gap:5px;',
+    '  border:1px solid rgba(160,140,220,0.15);',
+    '  background:rgba(255,255,255,0.02);',
+    '  transition:border-color .12s ease,background .12s ease,opacity .12s ease;',
+    '}',
+    '.wof-item:hover{border-color:rgba(200,170,120,0.5);}',
+    '.wof-ico{',
+    '  width:64px;height:48px;border-radius:5px;',
+    '  background-size:cover;background-position:center;',
+    '  box-shadow:0 1px 4px rgba(0,0,0,0.4);',
+    '}',
+    '.wof-name{font-size:0.66rem;line-height:1.15;text-align:center;',
+    '  color:#cfc4ec;max-width:80px;}',
+    '.wof-item.off{opacity:0.32;filter:grayscale(1);}',
+    '.wof-item.off .wof-name{color:#7a6aa8;}',
+    '.wof-check{',
+    '  position:absolute;top:4px;right:4px;width:16px;height:16px;border-radius:50%;',
+    '  display:flex;align-items:center;justify-content:center;font-size:11px;',
+    '  background:rgba(120,220,160,0.9);color:#08260f;font-weight:700;',
+    '}',
+    '.wof-item.off .wof-check{background:rgba(120,90,120,0.5);color:transparent;}',
+
+    '.wof-warn{',
+    '  margin-top:14px;padding:10px 14px;border-radius:8px;font-size:0.82rem;',
+    '  background:rgba(120,40,40,0.25);border:1px solid rgba(220,120,120,0.4);',
+    '  color:#ffb8b8;display:none;',
+    '}',
+    '.wof-warn.show{display:block;}',
+    '.wof-foot{',
+    '  padding:14px 22px;border-top:1px solid rgba(200,170,120,0.18);',
+    '  display:flex;align-items:center;justify-content:space-between;',
+    '  font-size:0.8rem;color:#9a8cc0;',
+    '}',
+    '.wof-foot .wof-count{color:#c8b6ff;}',
+    '.wof-done{cursor:pointer;padding:9px 22px;border-radius:9px;',
+    '  color:#08260f;font-weight:600;letter-spacing:0.03em;',
+    '  background:linear-gradient(180deg,#e9d8a6,#c8a95f);border:none;}',
+    '.wof-done:hover{filter:brightness(1.08);}'
+  ].join('\n');
+
+  function injectCss() {
+    if (document.getElementById('wof-pool-css')) return;
+    var st = document.createElement('style');
+    st.id = 'wof-pool-css';
+    st.textContent = PANEL_CSS;
+    (document.head || document.documentElement).appendChild(st);
+  }
+
+  function el(tag, cls, txt) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (txt != null) e.textContent = txt;
+    return e;
+  }
+
+  function makeSection(title, arr) {
+    var sec = el('div', 'wof-section');
+    var head = el('div', 'wof-section-head');
+    head.appendChild(el('div', 'wof-section-title', title));
+    var actions = el('div', 'wof-section-actions');
+    var allBtn = el('button', 'wof-mini', 'Усі');
+    var noneBtn = el('button', 'wof-mini', 'Жодного');
+    actions.appendChild(allBtn);
+    actions.appendChild(noneBtn);
+    head.appendChild(actions);
+    sec.appendChild(head);
+
+    var grid = el('div', 'wof-grid');
+    sec.appendChild(grid);
+
+    arr.forEach(function (it) {
+      var cell = el('div', 'wof-item' + (ENABLED[it.n] ? '' : ' off'));
+      cell.setAttribute('data-name', it.n);
+      var ico = el('div', 'wof-ico');
+      ico.style.backgroundImage = "url('" + itemIconUrl(it.s) + "')";
+      var check = el('div', 'wof-check', '\u2713');
+      var name = el('div', 'wof-name', it.n);
+      cell.appendChild(ico);
+      cell.appendChild(check);
+      cell.appendChild(name);
+      cell.addEventListener('click', function () {
+        ENABLED[it.n] = !ENABLED[it.n];
+        cell.classList.toggle('off', !ENABLED[it.n]);
+        refreshFooter();
+      });
+      grid.appendChild(cell);
+    });
+
+    allBtn.addEventListener('click', function () {
+      arr.forEach(function (it) { ENABLED[it.n] = true; });
+      Array.prototype.forEach.call(grid.children, function (c) { c.classList.remove('off'); });
+      refreshFooter();
+    });
+    noneBtn.addEventListener('click', function () {
+      arr.forEach(function (it) { ENABLED[it.n] = false; });
+      Array.prototype.forEach.call(grid.children, function (c) { c.classList.add('off'); });
+      refreshFooter();
+    });
+
+    return sec;
+  }
+
+  var footerCountEl, warnEl;
+  function countEnabled() {
+    var n = 0;
+    [BOOTS, BLINKS, OTHERS].forEach(function (arr) {
+      arr.forEach(function (it) { if (ENABLED[it.n]) n++; });
+    });
+    return n;
+  }
+  function refreshFooter() {
+    if (footerCountEl) footerCountEl.textContent = countEnabled() + ' предметів увімкнено';
+    if (warnEl) {
+      var noBoots = enabledOf(BOOTS).length === 0;
+      warnEl.classList.toggle('show', noBoots);
+    }
+  }
+
+  function openPanel() {
+    injectCss();
+    var overlay = el('div', 'wof-overlay');
+    var modal = el('div', 'wof-modal');
+
+    var head = el('div', 'wof-modal-head');
+    var titleWrap = el('div');
+    titleWrap.appendChild(el('div', 'wof-modal-title', 'Налаштувати пул предметів'));
+    titleWrap.appendChild(el('div', 'wof-modal-sub', 'Оберіть, які предмети можуть випадати. Скидається при перезавантаженні.'));
+    head.appendChild(titleWrap);
+    var x = el('button', 'wof-x', '\u00d7');
+    head.appendChild(x);
+    modal.appendChild(head);
+
+    var body = el('div', 'wof-body');
+    body.appendChild(makeSection('Черевики', BOOTS));
+    body.appendChild(makeSection('Блінки', BLINKS));
+    body.appendChild(makeSection('Інші предмети', OTHERS));
+
+    warnEl = el('div', 'wof-warn', '\u26a0 Усі черевики вимкнено — ролл усе одно візьме випадкові черевики, бо кожен набір потребує рівно одну пару.');
+    body.appendChild(warnEl);
+    modal.appendChild(body);
+
+    var foot = el('div', 'wof-foot');
+    footerCountEl = el('div', 'wof-count');
+    foot.appendChild(footerCountEl);
+    var done = el('button', 'wof-done', 'Готово');
+    foot.appendChild(done);
+    modal.appendChild(foot);
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    refreshFooter();
+
+    function close() {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }
+    x.addEventListener('click', close);
+    done.addEventListener('click', close);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+    document.addEventListener('keydown', function esc(e) {
+      if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+    });
+  }
+  window.openItemPool = openPanel;
+
+  // --- Inject the "Configure pool" button near the wheel controls ----------
+  function injectButton() {
+    if (document.getElementById('wof-pool-btn')) return true;
+    injectCss();
+    var btn = el('button', 'wof-pool-btn');
+    btn.id = 'wof-pool-btn';
+    btn.innerHTML = '\u2699\ufe0f <span>Налаштувати пул</span>';
+    btn.addEventListener('click', openPanel);
+
+    // Prefer to sit alongside the existing secondary controls / spin button.
+    var host = document.querySelector('.secondary-controls')
+            || document.querySelector('.controls')
+            || (document.getElementById('spin-btn') && document.getElementById('spin-btn').parentNode);
+    if (host) {
+      host.appendChild(btn);
+      return true;
+    }
+    return false;
+  }
+
+  // The React app mounts asynchronously; retry until the controls exist, then
+  // stop. Falls back to a fixed-position button if nothing is found in time.
+  var tries = 0;
+  var timer = setInterval(function () {
+    tries++;
+    if (injectButton() || tries > 40) {
+      clearInterval(timer);
+      if (!document.getElementById('wof-pool-btn')) {
+        injectCss();
+        var btn = el('button', 'wof-pool-btn');
+        btn.id = 'wof-pool-btn';
+        btn.style.cssText = 'position:fixed;top:16px;right:16px;z-index:99999;';
+        btn.innerHTML = '\u2699\ufe0f <span>Налаштувати пул</span>';
+        btn.addEventListener('click', openPanel);
+        document.body.appendChild(btn);
+      }
+    }
+  }, 250);
+
   console.info(
-    "[Wheel of Fate] items patched (7.41c):",
+    "[Wheel of Fate] items patched (7.41c + pool selector):",
     BOOTS.length + " boots,",
     BLINKS.length + " blinks,",
     OTHERS.length + " others.",
-    "Each roll: 1 boots + (0-1) blink + others, no dupes."
+    "Click 'Налаштувати пул' to choose which items can roll."
   );
 })();
