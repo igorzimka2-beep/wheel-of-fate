@@ -1,5 +1,5 @@
 // ============ Wheel of Fate — App ============
-const { useState, useEffect, useRef, useCallback, useMemo } = React;
+const { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } = React;
 
 // ============ Image lookups (Steam CDN via dotaconstants) ============
 const STEAM_CDN = "https://cdn.cloudflare.steamstatic.com";
@@ -825,7 +825,7 @@ function Wheel({ heroes, rotation, spinning, landed, chosenName, flashIdx, flash
                   while spinning so hover can never fight the roll. */}
               <g style={{
                    transform: isHovered ? 'scale(1.12)' : 'scale(1)',
-                   transformOrigin: `${x}px ${y}px`,
+                   transformOrigin: 'center',
                    transformBox: 'fill-box',
                    transition: 'transform 0.2s cubic-bezier(0.22,1,0.36,1)',
                    cursor: spinning ? 'default' : 'pointer',
@@ -1183,6 +1183,16 @@ function RevealItem({ name, i }) {
 function HeroReveal({ hero, role, items, closing, mood, entrance, ghostName, onCastAgain, onReforge, onClose }) {
   const [imgError, setImgError] = useState(false);
   const [settled, setSettled] = useState(false);
+  const heroVisualRef = useRef(null);
+  // Godrays (.reveal-rays) are conic-gradients on a 150vh box positioned by
+  // CSS %, which can't know the real pixel center of the hero portrait (its
+  // box depends on the eyebrow/items-bar heights, both content-sized). We
+  // measure the actual rendered hero element instead and feed its center
+  // back as inline top/left, overriding the CSS fallback — accurate at any
+  // viewport size or hero art. .reveal-stage is `position:fixed; inset:0`,
+  // so its box origin is the viewport origin and getBoundingClientRect()
+  // values can be used directly as the rays' `top`/`left`.
+  const [rayCenter, setRayCenter] = useState(null);
   useEffect(() => { setImgError(false); }, [hero && hero.name]);
   // After the entrance plays, drop the animation classes so the reveal rests
   // at its natural (fully-visible) state — robust even if the tab is hidden
@@ -1192,6 +1202,20 @@ function HeroReveal({ hero, role, items, closing, mood, entrance, ghostName, onC
     const id = setTimeout(() => setSettled(true), 1750);
     return () => clearTimeout(id);
   }, [hero && hero.name]);
+  useLayoutEffect(() => {
+    function measure() {
+      const el = heroVisualRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      setRayCenter({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+    }
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+    // Re-measure once the entrance transform (heroIn/heroMaterialize on
+    // .reveal-hero-wrap) has finished, i.e. when `settled` flips true —
+    // otherwise we'd lock onto the mid-animation position.
+  }, [hero && hero.name, imgError, settled]);
   if (!hero) return null;
 
   const glow = ATTR_BRIGHT[hero.attr] || '#c088ff';
@@ -1209,7 +1233,8 @@ function HeroReveal({ hero, role, items, closing, mood, entrance, ghostName, onC
          style={{ '--hero': glow }}
          role="dialog" aria-label={`Fate sealed — ${hero.name}`}>
       <div className="reveal-bg" />
-      <div className="reveal-rays" />
+      <div className="reveal-rays"
+           style={rayCenter ? { top: `${rayCenter.y}px`, left: `${rayCenter.x}px` } : undefined} />
       <div className="reveal-beam" />
       <div className="reveal-vignette" />
 
@@ -1221,9 +1246,9 @@ function HeroReveal({ hero, role, items, closing, mood, entrance, ghostName, onC
         {ghostName && <h2 className="reveal-ghostname" aria-hidden="true">{hero.name}</h2>}
         <div className="reveal-hero-wrap">
           {!imgError
-            ? <img className="reveal-hero" src={heroPortrait(hero.name)} alt={hero.name}
+            ? <img className="reveal-hero" ref={heroVisualRef} src={heroPortrait(hero.name)} alt={hero.name}
                    onError={() => setImgError(true)} />
-            : <div className="reveal-hero-fallback">{initials(hero.name)}</div>}
+            : <div className="reveal-hero-fallback" ref={heroVisualRef}>{initials(hero.name)}</div>}
           <div className="reveal-pedestal" />
         </div>
         <div className="reveal-nameplate">

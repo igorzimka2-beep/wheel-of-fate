@@ -122,7 +122,11 @@
     '  box-shadow:0 0 0 1px rgba(230,205,140,0.3),0 8px 26px rgba(0,0,0,0.5),0 0 30px rgba(200,170,120,0.25);',
     '}',
     '.wof-pool-btn:hover::after{background-position:-60% 0;}',
-    '.wof-pool-btn:active{transform:translateY(1px);}',
+    '.wof-pool-btn:active{',
+    '  transform:translateY(1px) scale(0.98);',
+    '  box-shadow:0 0 0 1px rgba(200,170,120,0.1),inset 0 2px 8px rgba(10,5,30,0.45);',
+    '  transition:transform .13s cubic-bezier(0.22,1,0.36,1),box-shadow .13s cubic-bezier(0.22,1,0.36,1);',
+    '}',
 
     '.wof-overlay{',
     '  position:fixed;inset:0;z-index:100000;',
@@ -145,6 +149,7 @@
     '}',
     '@keyframes wofModalIn{from{opacity:0;transform:scale(0.94) translateY(14px);}to{opacity:1;transform:scale(1) translateY(0);}}',
     '.wof-modal-head{',
+    '  flex:0 0 auto;',
     '  display:flex;align-items:center;justify-content:space-between;',
     '  padding:18px 22px;border-bottom:1px solid rgba(200,170,120,0.18);',
     '}',
@@ -155,7 +160,23 @@
     '  transition:color .2s cubic-bezier(0.22,1,0.36,1),background .2s cubic-bezier(0.22,1,0.36,1),transform .2s cubic-bezier(0.22,1,0.36,1);}',
     '.wof-x:hover{color:#fff;background:rgba(255,255,255,0.06);transform:rotate(90deg);}',
 
-    '.wof-body{overflow-y:auto;padding:8px 22px 22px;}',
+    // flex:1 1 auto + min-height:0 is what actually makes this scroll: a flex
+    // column child defaults to min-height:auto (= its content size), which
+    // stops it from ever shrinking below that — so overflow-y:auto never
+    // engages and the whole modal just grows past .wof-modal's max-height
+    // instead, clipping the footer. min-height:0 lets it shrink to fit the
+    // remaining space so head/foot stay put and only this scrolls.
+    '.wof-body{',
+    '  flex:1 1 auto;min-height:0;overflow-y:auto;padding:8px 22px 22px;',
+    '  scrollbar-width:thin;scrollbar-color:rgba(168,132,230,0.55) rgba(255,255,255,0.05);',
+    '}',
+    '.wof-body::-webkit-scrollbar{width:9px;}',
+    '.wof-body::-webkit-scrollbar-track{background:rgba(255,255,255,0.04);border-radius:8px;}',
+    '.wof-body::-webkit-scrollbar-thumb{',
+    '  background-color:rgba(168,132,230,0.55);border-radius:8px;',
+    '  border:2px solid transparent;background-clip:padding-box;',
+    '}',
+    '.wof-body::-webkit-scrollbar-thumb:hover{background-color:rgba(190,155,250,0.75);background-clip:padding-box;}',
     '.wof-section{margin-top:18px;}',
     '.wof-section-head{',
     '  display:flex;align-items:center;justify-content:space-between;',
@@ -169,6 +190,12 @@
     '  border:1px solid rgba(160,140,220,0.25);',
     '  transition:background .25s cubic-bezier(0.22,1,0.36,1),transform .25s cubic-bezier(0.22,1,0.36,1);}',
     '.wof-mini:hover{background:rgba(120,90,220,0.24);transform:translateY(-1px);}',
+    '.wof-mini:active{',
+    '  transform:translateY(0) scale(0.96);',
+    '  background:rgba(120,90,220,0.32);',
+    '  box-shadow:inset 0 2px 6px rgba(10,5,30,0.4);',
+    '  transition:transform .13s cubic-bezier(0.22,1,0.36,1),background .13s cubic-bezier(0.22,1,0.36,1),box-shadow .13s cubic-bezier(0.22,1,0.36,1);',
+    '}',
 
     '.wof-grid{',
     '  display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));',
@@ -231,6 +258,7 @@
     '  margin-top:14px;padding:10px 14px;max-height:80px;opacity:1;border-width:1px;',
     '}',
     '.wof-foot{',
+    '  flex:0 0 auto;',
     '  padding:14px 22px;border-top:1px solid rgba(200,170,120,0.18);',
     '  display:flex;align-items:center;justify-content:space-between;',
     '  font-size:0.8rem;color:#9a8cc0;',
@@ -242,7 +270,11 @@
     '  box-shadow:0 4px 14px rgba(0,0,0,0.35);',
     '  transition:filter .25s cubic-bezier(0.22,1,0.36,1),transform .25s cubic-bezier(0.22,1,0.36,1),box-shadow .25s cubic-bezier(0.22,1,0.36,1);}',
     '.wof-done:hover{filter:brightness(1.08);transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,0.45);}',
-    '.wof-done:active{transform:translateY(0);}'
+    '.wof-done:active{',
+    '  transform:translateY(0) scale(0.97);filter:brightness(0.96);',
+    '  box-shadow:inset 0 3px 8px rgba(0,0,0,0.35);',
+    '  transition:transform .13s cubic-bezier(0.22,1,0.36,1),box-shadow .13s cubic-bezier(0.22,1,0.36,1),filter .13s cubic-bezier(0.22,1,0.36,1);',
+    '}'
   ].join('\n');
 
   function injectCss() {
