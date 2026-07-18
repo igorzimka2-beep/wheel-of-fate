@@ -586,6 +586,9 @@ function Filters({ filters, setFilters, disabled }) {
 const CENTER = 300;
 const R_OUTER = 270;
 const R_INNER = 64;
+// Optional pseudo-3D tilt for the wheel-stage container. Off by default —
+// perspective(rotateX) distorts labels near the top/bottom edge of the ring.
+const WHEEL_TILT_ENABLED = false;
 
 function polarToCart(angle, r) {
   const rad = (angle - 90) * Math.PI / 180;
@@ -600,16 +603,59 @@ function arcPath(s, e, ro, ri) {
   return `M ${x1} ${y1} A ${ro} ${ro} 0 ${large} 1 ${x2} ${y2} L ${x3} ${y3} A ${ri} ${ri} 0 ${large} 0 ${x4} ${y4} Z`;
 }
 
-function Wheel({ heroes, rotation, spinning, landed, chosenName }) {
+// Replays the wheel-rotor's CSS transition-timing-function
+// (cubic-bezier(0.08, 0.62, 0.06, 1)) in JS so we can compute "where is the
+// wheel right now" during a spin without reading getComputedStyle every
+// frame. Same standard Newton-Raphson + bisection approach the sound patch
+// uses for its own tick timing — kept as a separate, self-contained copy
+// here since this module can't share state with that inline script.
+function makeBezierEase(mX1, mY1, mX2, mY2) {
+  function A(a1, a2) { return 1.0 - 3.0 * a2 + 3.0 * a1; }
+  function B(a1, a2) { return 3.0 * a2 - 6.0 * a1; }
+  function C(a1) { return 3.0 * a1; }
+  function calc(t, a1, a2) { return ((A(a1, a2) * t + B(a1, a2)) * t + C(a1)) * t; }
+  function slope(t, a1, a2) { return 3.0 * A(a1, a2) * t * t + 2.0 * B(a1, a2) * t + C(a1); }
+  function tForX(x) {
+    let t = x;
+    for (let i = 0; i < 8; i++) {
+      const dx = calc(t, mX1, mX2) - x;
+      if (Math.abs(dx) < 1e-6) return t;
+      const d = slope(t, mX1, mX2);
+      if (Math.abs(d) < 1e-6) break;
+      t -= dx / d;
+    }
+    let lo = 0, hi = 1;
+    t = x;
+    for (let j = 0; j < 20; j++) {
+      const cx = calc(t, mX1, mX2);
+      if (Math.abs(cx - x) < 1e-6) return t;
+      if (cx < x) lo = t; else hi = t;
+      t = (lo + hi) / 2;
+    }
+    return t;
+  }
+  return function (x) {
+    if (x <= 0) return 0;
+    if (x >= 1) return 1;
+    return calc(tForX(x), mY1, mY2);
+  };
+}
+const WHEEL_EASE = makeBezierEase(0.08, 0.62, 0.06, 1);
+const SPIN_DURATION_MS = 7200; // must match .wheel-rotor's CSS transition duration
+
+function Wheel({ heroes, rotation, spinning, landed, chosenName, flashIdx, flashKey }) {
   const n = heroes.length;
   const segAngle = n > 0 ? 360 / n : 0;
+  const isEmpty = n === 0;
 
   // Adaptive label sizing — with up to 16 heroes, labels can be generous.
   // For tighter packs (e.g. someone picks 1-3 from a single attribute), bump down only slightly.
   const labelFontSize = n <= 8 ? 13 : n <= 12 ? 12 : 11;
 
-  // Pole tilt for the wireframe globe — feels like a planet, not a flat disc
-  const GLOBE_TILT = 22;
+  // Hover state for hero portraits — local to the wheel, disabled while spinning
+  // so it can never fight the roll animation or the CSS-driven rotor transform.
+  const [hoveredIdx, setHoveredIdx] = useState(-1);
+  const hoverActive = hoveredIdx >= 0 && !spinning;
 
   return (
     <svg className="wheel-svg" viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg">
@@ -625,30 +671,32 @@ function Wheel({ heroes, rotation, spinning, landed, chosenName }) {
           <stop offset="0.6" stopColor="#c062ff" stopOpacity="0.3" />
           <stop offset="1" stopColor="#5a1a80" stopOpacity="0" />
         </radialGradient>
-        <radialGradient id="globeFill" cx="0.35" cy="0.3" r="0.85">
-          <stop offset="0" stopColor="#5a2db8" stopOpacity="0.6" />
-          <stop offset="0.55" stopColor="#1a0a44" stopOpacity="0.95" />
-          <stop offset="1" stopColor="#0a0418" stopOpacity="1" />
-        </radialGradient>
         <radialGradient id="haloGrad" cx="0.5" cy="0.5" r="0.5">
           <stop offset="0" stopColor="currentColor" stopOpacity="0.7" />
           <stop offset="0.5" stopColor="currentColor" stopOpacity="0.18" />
           <stop offset="1" stopColor="currentColor" stopOpacity="0" />
         </radialGradient>
-        <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
-          <feGaussianBlur stdDeviation="3.5" result="b" />
-          <feMerge>
-            <feMergeNode in="b" />
-            <feMergeNode in="SourceGraphic" />
-          </feMerge>
+
+        {/* Pseudo-3D volume pass — prefixed wof- to avoid clashing with the
+            gradients above. There are no filled pie segments in this
+            constellation-dial design, so the "convex disc" feel is built from:
+            a soft drop shadow under the whole disc, a glossy sheen ring on the
+            static outer rim, and a low-opacity static light/shadow overlay
+            over the rotating star ring (sits above the rotor, so it never
+            rotates). The hub itself is now the <AstralCore> WebGL layer. */}
+        <filter id="wof-discShadow" x="-30%" y="-30%" width="160%" height="160%">
+          <feDropShadow dx="0" dy="10" stdDeviation="14" floodColor="#5921ad" floodOpacity="0.5" />
         </filter>
-        <filter id="hardGlow" x="-50%" y="-50%" width="200%" height="200%">
-          <feGaussianBlur stdDeviation="1.5" result="b" />
-          <feMerge>
-            <feMergeNode in="b" />
-            <feMergeNode in="SourceGraphic" />
-          </feMerge>
-        </filter>
+        <radialGradient id="wof-rimSheen" cx="0.32" cy="0.26" r="0.9">
+          <stop offset="0" stopColor="#ffffff" stopOpacity="0.6" />
+          <stop offset="0.35" stopColor="#ffffff" stopOpacity="0.12" />
+          <stop offset="1" stopColor="#ffffff" stopOpacity="0" />
+        </radialGradient>
+        <radialGradient id="wof-discShade" cx="0.5" cy="0.3" r="0.78">
+          <stop offset="0" stopColor="#ffffff" stopOpacity="0.13" />
+          <stop offset="0.55" stopColor="#ffffff" stopOpacity="0" />
+          <stop offset="1" stopColor="#000000" stopOpacity="0.24" />
+        </radialGradient>
         {heroes.map((_, i) => {
           const [x, y] = polarToCart(i * segAngle, 240);
           return (
@@ -659,29 +707,51 @@ function Wheel({ heroes, rotation, spinning, landed, chosenName }) {
         })}
       </defs>
 
-      {/* Outer cosmic rim — soft fade, no heavy bronze look */}
-      <circle cx={CENTER} cy={CENTER} r="298" fill="url(#outerRim)" />
-      <circle cx={CENTER} cy={CENTER} r="296" fill="none" stroke="rgba(200, 176, 255, 0.32)" strokeWidth="1" />
-      <circle cx={CENTER} cy={CENTER} r="287" fill="none" stroke="rgba(232, 168, 255, 0.18)" strokeWidth="0.5" strokeDasharray="2 4" />
+      {/* Soft shadow the whole disc casts downward — read as the wheel having weight/volume */}
+      <ellipse cx={CENTER} cy={CENTER + 14} rx="282" ry="282"
+               fill="#000000" opacity="0.35" filter="url(#wof-discShadow)" pointerEvents="none" />
 
-      {/* Decorative star pricks around the very edge — sparse, alternating sizes */}
-      <g opacity="0.85">
-        {Array.from({ length: 36 }, (_, i) => {
-          const a = (i / 36) * 360;
-          const [x, y] = polarToCart(a, 277);
-          const big = i % 3 === 0;
-          return (
-            <circle key={`s${i}`} cx={x} cy={y} r={big ? 1.6 : 0.7}
-                    fill="white" opacity={big ? 0.95 : 0.45}
-                    style={big ? { filter: 'drop-shadow(0 0 3px rgba(232,168,255,0.9))' } : null} />
-          );
-        })}
+      {/* Static rim decorations — dimmed as a group when the filter pool is
+          empty, so the ring itself reads as "hushed" rather than broken. */}
+      <g opacity={isEmpty ? 0.4 : 1} style={{ transition: 'opacity 0.4s ease-out' }}>
+        {/* Outer cosmic rim — soft fade, no heavy bronze look */}
+        <circle cx={CENTER} cy={CENTER} r="298" fill="url(#outerRim)" />
+        <circle cx={CENTER} cy={CENTER} r="296" fill="none" stroke="rgba(200, 176, 255, 0.32)" strokeWidth="1" />
+        {/* Glossy sheen on the rim — brighter upper-left, fading away, for a lit-from-above bevel */}
+        <circle cx={CENTER} cy={CENTER} r="292" fill="none" stroke="url(#wof-rimSheen)" strokeWidth="12" pointerEvents="none" />
+        <circle cx={CENTER} cy={CENTER} r="287" fill="none" stroke="rgba(232, 168, 255, 0.18)" strokeWidth="0.5" strokeDasharray="2 4" />
+
+        {/* Decorative star pricks around the very edge — sparse, alternating sizes */}
+        <g opacity="0.85">
+          {Array.from({ length: 36 }, (_, i) => {
+            const a = (i / 36) * 360;
+            const [x, y] = polarToCart(a, 277);
+            const big = i % 3 === 0;
+            return (
+              <circle key={`s${i}`} cx={x} cy={y} r={big ? 1.6 : 0.7}
+                      fill="white" opacity={big ? 0.95 : 0.45}
+                      style={big ? { filter: 'drop-shadow(0 0 3px rgba(232,168,255,0.9))' } : null} />
+            );
+          })}
+        </g>
+
+        {/* Subtle inner constellation ring — guides the eye to the hero orbit */}
+        <circle cx={CENTER} cy={CENTER} r="240" fill="none"
+                stroke="rgba(200, 176, 255, 0.16)" strokeWidth="0.6"
+                strokeDasharray="1 5" />
       </g>
 
-      {/* Subtle inner constellation ring — guides the eye to the hero orbit */}
-      <circle cx={CENTER} cy={CENTER} r="240" fill="none"
-              stroke="rgba(200, 176, 255, 0.16)" strokeWidth="0.6"
-              strokeDasharray="1 5" />
+      {/* Empty-pool hint — only when the filters left nothing on the wheel.
+          Sits in the open ring between the astral core and where the
+          portrait orbit would be, so it never fights the 3D layer. */}
+      {isEmpty && (
+        <text x={CENTER} y={CENTER + 168} textAnchor="middle"
+              fontFamily="'Cormorant Garamond', serif" fontStyle="italic"
+              fontSize="17" fill="rgba(220, 200, 255, 0.6)"
+              style={{ filter: 'drop-shadow(0 0 6px rgba(192, 98, 255, 0.35))' }}>
+          Пом'якши фільтри долі
+        </text>
+      )}
 
       {/* ROTOR — hero stars + connecting constellation lines + labels */}
       <g className="wheel-rotor" style={{ transform: `rotate(${rotation}deg)` }}>
@@ -700,11 +770,30 @@ function Wheel({ heroes, rotation, spinning, landed, chosenName }) {
           );
         })}
 
+        {/* Segment tick marks — one short radial dash centered in the gap
+            between each pair of neighbouring heroes, on the outer ring.
+            Purely decorative separators; lives in the rotor so it spins
+            with the heroes. */}
+        {n > 1 && heroes.map((_, i) => {
+          const tickAngle = (i + 0.5) * segAngle;
+          const [tx1, ty1] = polarToCart(tickAngle, 262);
+          const [tx2, ty2] = polarToCart(tickAngle, 278);
+          return (
+            <line key={`tick-${i}`}
+                  x1={tx1} y1={ty1} x2={tx2} y2={ty2}
+                  stroke="rgba(232, 168, 255, 0.5)"
+                  strokeWidth="1.5"
+                  strokeLinecap="round" />
+          );
+        })}
+
         {/* Hero stars */}
         {heroes.map((hero, i) => {
           const a = i * segAngle;
           const [x, y] = polarToCart(a, 240);
           const isChosen = landed && hero.name === chosenName;
+          const isHovered = hoverActive && hoveredIdx === i;
+          const isFlashing = spinning && flashIdx === i;
           const attrColor = ATTR_BRIGHT[hero.attr];
           return (
             <g key={`h-${i}`} style={{ color: attrColor, transition: 'opacity 0.4s' }}
@@ -717,19 +806,47 @@ function Wheel({ heroes, rotation, spinning, landed, chosenName }) {
               <circle cx={x} cy={y} r={isChosen ? 36 : 32} fill={attrColor}
                       opacity={isChosen ? 0.28 : 0.12}
                       style={{ transition: 'all 0.4s' }} />
-              {/* Portrait bezel */}
-              <circle cx={x} cy={y} r="28" fill="#160a32" />
-              {/* Hero portrait */}
-              <image href={heroImg(hero.name)}
-                     x={x - 26} y={y - 26} width="52" height="52"
-                     clipPath={`url(#hp-${i})`}
-                     preserveAspectRatio="xMidYMid slice" />
-              {/* Bezel rings */}
-              <circle cx={x} cy={y} r="26" fill="none" stroke="rgba(0,0,0,0.5)" strokeWidth="1.5" />
-              <circle cx={x} cy={y} r="28" fill="none"
-                      stroke={attrColor}
-                      strokeWidth={isChosen ? 2.8 : 1.6}
-                      style={{ transition: 'stroke-width 0.4s' }} />
+              {/* Hover glow — attribute-coloured, only while idle (never during spin) */}
+              <circle cx={x} cy={y} r={isHovered ? 48 : 30} fill={attrColor}
+                      opacity={isHovered ? 0.32 : 0}
+                      pointerEvents="none"
+                      style={{ transition: 'r 0.2s cubic-bezier(0.22,1,0.36,1), opacity 0.2s cubic-bezier(0.22,1,0.36,1)' }} />
+              {/* Under-pointer flash while spinning — one-shot ring, remounted
+                  via `flashKey` each time this hero passes the pin, synced to
+                  the same rotation math the tick sound uses. */}
+              {isFlashing && (
+                <circle key={`flash-${flashKey}`} cx={x} cy={y} r="30" fill="none"
+                        stroke="#ffffff" strokeWidth="3" pointerEvents="none">
+                  <animate attributeName="r" values="30;46" dur="0.32s" fill="freeze" />
+                  <animate attributeName="opacity" values="0.9;0" dur="0.32s" fill="freeze" />
+                </circle>
+              )}
+              {/* Hover/interaction target + scale-up. Pointer events fully off
+                  while spinning so hover can never fight the roll. */}
+              <g style={{
+                   transform: isHovered ? 'scale(1.12)' : 'scale(1)',
+                   transformOrigin: `${x}px ${y}px`,
+                   transformBox: 'fill-box',
+                   transition: 'transform 0.2s cubic-bezier(0.22,1,0.36,1)',
+                   cursor: spinning ? 'default' : 'pointer',
+                 }}
+                 pointerEvents={spinning ? 'none' : 'auto'}
+                 onMouseEnter={() => setHoveredIdx(i)}
+                 onMouseLeave={() => setHoveredIdx(cur => (cur === i ? -1 : cur))}>
+                {/* Portrait bezel */}
+                <circle cx={x} cy={y} r="28" fill="#160a32" />
+                {/* Hero portrait */}
+                <image href={heroImg(hero.name)}
+                       x={x - 26} y={y - 26} width="52" height="52"
+                       clipPath={`url(#hp-${i})`}
+                       preserveAspectRatio="xMidYMid slice" />
+                {/* Bezel rings */}
+                <circle cx={x} cy={y} r="26" fill="none" stroke="rgba(0,0,0,0.5)" strokeWidth="1.5" />
+                <circle cx={x} cy={y} r="28" fill="none"
+                        stroke={attrColor}
+                        strokeWidth={isChosen || isHovered ? 2.8 : 1.6}
+                        style={{ transition: 'stroke-width 0.2s cubic-bezier(0.22,1,0.36,1)' }} />
+              </g>
               {/* Sparkle on top of chosen hero */}
               {isChosen && (
                 <g transform={`translate(${x} ${y - 36})`}>
@@ -739,6 +856,21 @@ function Wheel({ heroes, rotation, spinning, landed, chosenName }) {
                   </path>
                 </g>
               )}
+              {/* Hover tooltip — counter-rotated by -rotation so it always
+                  reads upright on screen no matter where the rotor is
+                  currently resting. */}
+              {isHovered && (
+                <g transform={`rotate(${-rotation} ${x} ${y})`} pointerEvents="none"
+                   style={{ opacity: 1, transition: 'opacity 0.2s cubic-bezier(0.22,1,0.36,1)' }}>
+                  <rect x={x - 58} y={y - 68} width="116" height="26" rx="7"
+                        fill="rgba(28, 16, 68, 0.92)" stroke="rgba(200, 176, 255, 0.4)" strokeWidth="1" />
+                  <text x={x} y={y - 55} textAnchor="middle" dominantBaseline="middle"
+                        fontFamily="Cinzel, serif" fontWeight="700" fontSize="11"
+                        letterSpacing="0.04em" fill="#f0e0ff" style={{ textTransform: 'uppercase' }}>
+                    {hero.name}
+                  </text>
+                </g>
+              )}
             </g>
           );
         })}
@@ -746,17 +878,27 @@ function Wheel({ heroes, rotation, spinning, landed, chosenName }) {
         {/* Hero name labels — outside the portrait ring, tangent to the orbit */}
         {heroes.map((hero, i) => {
           const a = i * segAngle;
-          const [lx, ly] = polarToCart(a, 282);
-          // Tangent angle so text reads along the orbit. Flip on the bottom half so it's not upside-down.
-          let rot = a;
-          if (a > 90 && a < 270) rot = a + 180;
+          const [lx, ly] = polarToCart(a, 286);
           const isChosen = landed && hero.name === chosenName;
+          // While landed, the chosen hero sits right at the top, directly
+          // under the fixed pointer graphic — its own label would just get
+          // clipped there. The "Fate is sealed" status line under the button
+          // is the single source of truth for the name once landed instead.
+          if (isChosen) return null;
+          // Tangent angle so text reads along the orbit. The flip must use
+          // the hero's CURRENT on-screen angle (its static angle plus the
+          // rotor's live rotation), not just its static angle — otherwise
+          // labels read upside-down for any hero that ends up in the bottom
+          // half after a spin settles somewhere other than rotation%360===0.
+          const effectiveAngle = ((a + rotation) % 360 + 360) % 360;
+          let rot = a;
+          if (effectiveAngle > 90 && effectiveAngle < 270) rot = a + 180;
           return (
             <text key={`lbl-${i}`}
                   x={lx} y={ly}
-                  fill={isChosen ? '#ffffff' : '#e8d8ff'}
+                  fill="#e8d8ff"
                   fontFamily="Cinzel, serif"
-                  fontWeight={isChosen ? 800 : 600}
+                  fontWeight={600}
                   fontSize={labelFontSize}
                   letterSpacing="0.08em"
                   textAnchor="middle"
@@ -764,11 +906,9 @@ function Wheel({ heroes, rotation, spinning, landed, chosenName }) {
                   transform={`rotate(${rot} ${lx} ${ly})`}
                   style={{
                     textTransform: 'uppercase',
-                    filter: isChosen
-                      ? 'drop-shadow(0 0 8px rgba(255,255,255,0.9))'
-                      : 'drop-shadow(0 0 4px rgba(192, 98, 255, 0.5))',
+                    filter: 'drop-shadow(0 0 4px rgba(192, 98, 255, 0.5))',
                     transition: 'fill 0.4s',
-                    opacity: landed && !isChosen ? 0.5 : 1,
+                    opacity: landed ? 0.5 : 1,
                   }}>
               {hero.name}
             </text>
@@ -776,78 +916,22 @@ function Wheel({ heroes, rotation, spinning, landed, chosenName }) {
         })}
       </g>
 
-      {/* CENTRAL NEBULA + WIREFRAME GLOBE (static, big and prominent) */}
+      {/* Static convex-light overlay — sits above the rotating star ring but
+          does NOT rotate itself, so the "highlight" stays fixed while the
+          hero stars spin underneath (the actual pseudo-3D cue). Kept low-
+          opacity so portraits and name labels stay just as readable. */}
+      <circle cx={CENTER} cy={CENTER} r="287" fill="url(#wof-discShade)" pointerEvents="none" />
+
+      {/* CENTRAL NEBULA — soft ambient glow bed behind the 3D astral core.
+          The core itself (sphere + starfield) is a separate HTML/WebGL layer
+          (<AstralCore>) positioned by the App over this same spot; see the
+          "astral-core-slot" wrapper in the main render. */}
       <circle cx={CENTER} cy={CENTER} r="130" fill="url(#centerNebula)"
               opacity={spinning ? 1 : 0.7}>
         {spinning && (
           <animate attributeName="r" values="120;145;120" dur="1s" repeatCount="indefinite" />
         )}
       </circle>
-
-      <g transform={`translate(${CENTER} ${CENTER})`} filter="url(#softGlow)">
-        {/* Globe disc */}
-        <circle r="100" fill="url(#globeFill)" stroke="#c8b0ff" strokeWidth="0.8" opacity="0.95" />
-
-        {/* Latitude lines */}
-        <g transform={`rotate(${GLOBE_TILT})`}>
-          <ellipse rx="100" ry="9" fill="none" stroke="#e090ff" strokeWidth="0.9" opacity="0.85" />
-          <ellipse rx="98" ry="36" fill="none" stroke="#c8b0ff" strokeWidth="0.55" opacity="0.6" />
-          <ellipse rx="92" ry="62" fill="none" stroke="#c8b0ff" strokeWidth="0.5" opacity="0.5" />
-          <ellipse rx="78" ry="86" fill="none" stroke="#c8b0ff" strokeWidth="0.45" opacity="0.42" />
-          <ellipse rx="50" ry="96" fill="none" stroke="#c8b0ff" strokeWidth="0.4" opacity="0.32" />
-        </g>
-
-        {/* Longitude lines */}
-        <g transform={`rotate(${GLOBE_TILT})`}>
-          <ellipse rx="9" ry="100" fill="none" stroke="#e090ff" strokeWidth="0.9" opacity="0.85" />
-          <ellipse rx="36" ry="98" fill="none" stroke="#c8b0ff" strokeWidth="0.55" opacity="0.6" />
-          <ellipse rx="62" ry="92" fill="none" stroke="#c8b0ff" strokeWidth="0.5" opacity="0.5" />
-          <ellipse rx="86" ry="78" fill="none" stroke="#c8b0ff" strokeWidth="0.45" opacity="0.42" />
-          <ellipse rx="96" ry="50" fill="none" stroke="#c8b0ff" strokeWidth="0.4" opacity="0.32" />
-        </g>
-
-        {/* Outer tilted orbit ring around the globe */}
-        <g transform={`rotate(${GLOBE_TILT - 50})`} opacity="0.7">
-          <ellipse rx="115" ry="20" fill="none" stroke="#e090ff" strokeWidth="0.7" />
-          {/* A small satellite ember on this orbit */}
-          <circle cx="115" cy="0" r="2" fill="white">
-            <animate attributeName="opacity" values="0.6;1;0.6" dur="2s" repeatCount="indefinite" />
-          </circle>
-        </g>
-
-        {/* Star pricks on globe surface */}
-        {[
-          [-32, -44, true], [22, -28, false], [-18, 12, true], [38, 14, false],
-          [-50, -8, false], [10, 48, true], [54, -10, false], [-12, -56, false],
-          [44, 38, false], [-44, 36, false], [0, -30, true], [-22, 56, false],
-        ].map(([x, y, big], i) => (
-          <g key={`gs-${i}`}>
-            <circle cx={x} cy={y} r={big ? 1.9 : 1.1}
-                    fill="white" opacity={big ? 1 : 0.85}>
-              <animate attributeName="opacity"
-                       values={big ? "0.85;1;0.85" : "0.55;0.9;0.55"}
-                       dur={`${2 + i * 0.25}s`} repeatCount="indefinite" />
-            </circle>
-            {big && (
-              <circle cx={x} cy={y} r="4" fill="white" opacity="0.18" />
-            )}
-          </g>
-        ))}
-
-        {/* Center brightest star */}
-        <circle r="4.5" fill="white" />
-        <circle r="2.2" fill="#e090ff">
-          {spinning && (
-            <animate attributeName="r" values="2.2;5;2.2" dur="0.5s" repeatCount="indefinite" />
-          )}
-        </circle>
-
-        {/* Crosshair sparkle on center */}
-        <g opacity="0.5" filter="url(#hardGlow)">
-          <line x1="-14" y1="0" x2="14" y2="0" stroke="white" strokeWidth="0.5" />
-          <line x1="0" y1="-14" x2="0" y2="14" stroke="white" strokeWidth="0.5" />
-        </g>
-      </g>
     </svg>
   );
 }
@@ -885,6 +969,156 @@ function Pointer() {
     </div>
   );
 }
+
+// ============ Astral Core (Three.js — lives only inside the wheel's hub) ============
+// A tiny, self-contained WebGL scene: a glowing sphere with a starfield of
+// particles orbiting it. Renders into a plain HTML <canvas> layered over the
+// spot where the SVG wireframe globe used to sit — it never touches the SVG
+// wheel, the rotor, or the roll/reveal mechanics.
+//
+// Mounts its Three.js scene exactly once (empty effect deps) and disposes
+// every geometry/material/renderer + cancels the rAF loop on unmount, so
+// repeated re-renders of the wheel (every spin) can never leak WebGL
+// contexts. `spinning`/`landed` are read from a ref inside the render loop
+// instead of being effect dependencies, so prop changes during a spin don't
+// restart the scene.
+const AstralCore = React.memo(function AstralCore({ spinning, landed }) {
+  const mountRef = useRef(null);
+  const liveRef = useRef({ spinning: false, landed: false, flashAt: 0 });
+
+  useEffect(() => { liveRef.current.spinning = spinning; }, [spinning]);
+  useEffect(() => {
+    liveRef.current.landed = landed;
+    if (landed) liveRef.current.flashAt = performance.now();
+  }, [landed]);
+
+  useEffect(() => {
+    const THREE = window.THREE;
+    const mount = mountRef.current;
+    if (!THREE || !mount) return;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
+    camera.position.set(0, 0, 6.4);
+
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.domElement.style.cssText = 'width:100%;height:100%;display:block;';
+    mount.appendChild(renderer.domElement);
+
+    // --- Core sphere -----------------------------------------------------
+    const CORE_R = 1.7;
+    const coreMat = new THREE.MeshStandardMaterial({
+      color: 0x8a7fd9,
+      emissive: 0xafa9ec,
+      emissiveIntensity: 0.9,
+      metalness: 0.3,
+      roughness: 0.35,
+    });
+    const coreGeo = new THREE.SphereGeometry(CORE_R, 48, 48);
+    const core = new THREE.Mesh(coreGeo, coreMat);
+    scene.add(core);
+
+    // --- Soft outer glow shell (backside-lit, near-transparent) ----------
+    const glowMat = new THREE.MeshBasicMaterial({
+      color: 0xafa9ec, transparent: true, opacity: 0.12, side: THREE.BackSide,
+    });
+    const glowGeo = new THREE.SphereGeometry(CORE_R * 1.18, 32, 32);
+    const glow = new THREE.Mesh(glowGeo, glowMat);
+    scene.add(glow);
+
+    // --- Lights ------------------------------------------------------------
+    const ambient = new THREE.AmbientLight(0x8888ff, 0.5);
+    scene.add(ambient);
+    const lightWhite = new THREE.PointLight(0xffffff, 1.1);
+    lightWhite.position.set(3, 4, 3);
+    scene.add(lightWhite);
+    const lightPink = new THREE.PointLight(0xd4537e, 1.0);
+    lightPink.position.set(-3, -2, 2);
+    scene.add(lightPink);
+
+    // --- Star particles, scattered in a spherical shell around the core --
+    const PARTICLE_COUNT = 140;
+    const positions = new Float32Array(PARTICLE_COUNT * 3);
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      const r = 2 + Math.random() * 2.5;
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+      positions[i * 3 + 2] = r * Math.cos(phi);
+    }
+    const particleGeo = new THREE.BufferGeometry();
+    particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const particleMat = new THREE.PointsMaterial({
+      color: 0xeeedfe, size: 0.05, transparent: true, opacity: 0.85, sizeAttenuation: true,
+    });
+    const particles = new THREE.Points(particleGeo, particleMat);
+    scene.add(particles);
+
+    // --- Sizing — canvas always exactly fills its slot (the old hub spot) -
+    function resize() {
+      const w = mount.clientWidth || 1;
+      const h = mount.clientHeight || 1;
+      renderer.setSize(w, h);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    resize();
+    window.addEventListener('resize', resize);
+    const ro = window.ResizeObserver ? new ResizeObserver(resize) : null;
+    if (ro) ro.observe(mount);
+
+    // --- Animation loop ----------------------------------------------------
+    let raf = 0;
+    const t0 = performance.now();
+    function tick(now) {
+      raf = requestAnimationFrame(tick);
+      const t = (now - t0) / 1000;
+      const live = liveRef.current;
+      const spinBoost = live.spinning ? 3.2 : 1;
+
+      core.rotation.y += 0.006 * spinBoost;
+      core.rotation.x += 0.0015 * spinBoost;
+      particles.rotation.y -= 0.0022 * (live.spinning ? 1.8 : 1);
+      particles.rotation.x += 0.0008;
+
+      let pulse = 1 + Math.sin(t * 1.6) * 0.06;
+      let intensity = 0.7 + Math.sin(t * 1.6) * 0.3;
+      if (live.spinning) intensity += 0.25;
+
+      // Landing flash: a brief brighten-and-swell that eases back to idle.
+      const sinceLand = now - live.flashAt;
+      if (live.landed && sinceLand >= 0 && sinceLand < 900) {
+        const k = 1 - sinceLand / 900;
+        pulse += k * 0.35;
+        intensity += k * 1.4;
+      }
+
+      core.scale.setScalar(pulse);
+      coreMat.emissiveIntensity = Math.max(0.15, intensity);
+
+      renderer.render(scene, camera);
+    }
+    raf = requestAnimationFrame(tick);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', resize);
+      if (ro) ro.disconnect();
+      coreGeo.dispose();
+      coreMat.dispose();
+      glowGeo.dispose();
+      glowMat.dispose();
+      particleGeo.dispose();
+      particleMat.dispose();
+      renderer.dispose();
+      if (renderer.domElement.parentNode === mount) mount.removeChild(renderer.domElement);
+    };
+  }, []);
+
+  return <div ref={mountRef} style={{ width: '100%', height: '100%', pointerEvents: 'none' }} aria-hidden="true" />;
+});
 
 // ============ Empty Globe (cosmic sigil for empty state) ============
 function EmptySigil() {
@@ -1054,6 +1288,9 @@ function App() {
   const [status, setStatus] = useState({ msg: "Awaiting fate.", live: false });
   const [imagesReady, setImagesReady] = useState(false);
   const [wheelSample, setWheelSample] = useState([]);
+  const [flashIdx, setFlashIdx] = useState(-1);
+  const [flashKey, setFlashKey] = useState(0);
+  const flashRafRef = useRef(0);
 
   const tweaks = window.useTweaks
     ? window.useTweaks(TWEAK_DEFAULTS)
@@ -1063,6 +1300,14 @@ function App() {
 
   useEffect(() => {
     imageDataPromise.then(() => setImagesReady(true));
+  }, []);
+
+  // Safety net: make sure the under-pointer-flash rAF loop can never
+  // outlive the component (e.g. navigating away mid-spin).
+  useEffect(() => {
+    return () => {
+      if (flashRafRef.current) cancelAnimationFrame(flashRafRef.current);
+    };
   }, []);
 
   // Parallax scroll listener — throttle via rAF
@@ -1146,6 +1391,34 @@ function App() {
     const newRot = current + fullSpins * 360 + (target + jitter - (current % 360));
     setRotation(newRot);
 
+    // Drives "the hero currently under the pointer flashes" (in step with
+    // the tick sound, which derives its timing from the identical curve).
+    // Single rAF loop for this feature; cancelled the moment the spin ends.
+    if (flashRafRef.current) cancelAnimationFrame(flashRafRef.current);
+    const flashStart = current;
+    const flashEnd = newRot;
+    const flashT0 = performance.now();
+    let lastFlashSeg = Math.floor(flashStart / segAngle);
+    const tickFlash = (now) => {
+      const elapsed = now - flashT0;
+      const done = elapsed >= SPIN_DURATION_MS;
+      const p = done ? 1 : WHEEL_EASE(elapsed / SPIN_DURATION_MS);
+      const angle = flashStart + (flashEnd - flashStart) * p;
+      const seg = Math.floor(angle / segAngle);
+      if (seg !== lastFlashSeg) {
+        lastFlashSeg = seg;
+        const idx = ((-seg % n) + n) % n;
+        setFlashIdx(idx);
+        setFlashKey(k => k + 1);
+      }
+      if (done) {
+        flashRafRef.current = 0;
+        return;
+      }
+      flashRafRef.current = requestAnimationFrame(tickFlash);
+    };
+    flashRafRef.current = requestAnimationFrame(tickFlash);
+
     // Periodic spark bursts during the spin
     const sparkInterval = setInterval(() => {
       const burst = [];
@@ -1168,6 +1441,8 @@ function App() {
 
     setTimeout(() => {
       clearInterval(sparkInterval);
+      if (flashRafRef.current) { cancelAnimationFrame(flashRafRef.current); flashRafRef.current = 0; }
+      setFlashIdx(-1);
       setSpinning(false);
       setLanded(true);
       setShake(true);
@@ -1253,13 +1528,28 @@ Endgame items: ${items.join(', ')}`;
 
       <div className="main main-centered">
         <div className="wheel-section">
-          <div className={`wheel-stage${spinning ? ' spinning' : ''}${landed ? ' landed' : ''}${shake ? ' shake' : ''}`}>
+          <div className={`wheel-stage${spinning ? ' spinning' : ''}${landed ? ' landed' : ''}${shake ? ' shake' : ''}`}
+               style={WHEEL_TILT_ENABLED ? { transform: 'perspective(900px) rotateX(16deg)' } : undefined}>
             {spinning && t.motion !== 'subtle' && <div className="spin-rays" key={`r${revealKey}`} />}
             {landed && t.motion !== 'subtle' && <div className="shockwave" key={`s${revealKey}`} />}
             <Pointer />
             <Wheel heroes={wheelSample} rotation={rotation}
                    spinning={spinning} landed={landed}
-                   chosenName={chosen?.name} />
+                   chosenName={chosen?.name}
+                   flashIdx={flashIdx} flashKey={flashKey} />
+            {/* 3D astral core — sits exactly over the old wireframe globe's
+                spot (r=100 of the 600-viewBox wheel-svg = 33.33% of the
+                square wheel-stage, centered). Above the rotating star ring,
+                below the pointer/sparks/reveal. */}
+            <div className="astral-core-slot" style={{
+              position: 'absolute', top: '50%', left: '50%',
+              width: '33.333%', height: '33.333%',
+              transform: 'translate(-50%, -50%)',
+              zIndex: 3, pointerEvents: 'none',
+              borderRadius: '50%', overflow: 'hidden',
+            }}>
+              <AstralCore spinning={spinning} landed={landed} />
+            </div>
             <div className="sparks">
               {sparks.map(s => (
                 <span key={s.id} className="spark" style={{
@@ -1275,12 +1565,21 @@ Endgame items: ${items.join(', ')}`;
 
           <div className="spin-controls">
             <button className="spin-btn" onClick={spin}
-                    disabled={spinning || filteredHeroes.length === 0}>
+                    disabled={spinning || filteredHeroes.length === 0}
+                    style={spinning ? { opacity: 0.72, filter: 'saturate(0.7)' } : undefined}>
               <span className="blade">⚔</span>
-              Cast the Lot
+              {spinning ? 'The wheel turns…' : 'Cast the Lot'}
               <span className="blade blade-r">⚔</span>
             </button>
-            <p className={`status${status.live ? ' live' : ''}`}>{status.msg}</p>
+            <p className={`status${status.live ? ' live' : ''}`}
+               style={landed ? {
+                 fontSize: '19px',
+                 fontWeight: 600,
+                 textShadow: '0 0 18px rgba(232, 168, 255, 0.85), 0 0 36px rgba(192, 98, 255, 0.5)',
+                 transition: 'font-size 0.4s cubic-bezier(0.22,1,0.36,1), text-shadow 0.4s cubic-bezier(0.22,1,0.36,1)',
+               } : {
+                 transition: 'font-size 0.4s cubic-bezier(0.22,1,0.36,1), text-shadow 0.4s cubic-bezier(0.22,1,0.36,1)',
+               }}>{status.msg}</p>
           </div>
         </div>
       </div>
@@ -1307,7 +1606,7 @@ Endgame items: ${items.join(', ')}`;
                     ghostName={t.ghostName !== false}
                     onCastAgain={castAgain}
                     onReforge={rerollItems}
-                    onClose={() => closeReveal()} />
+                    onClose={() => closeReveal(() => setStatus({ msg: "Awaiting fate.", live: false }))} />
       )}
 
       {TweaksPanel && (
