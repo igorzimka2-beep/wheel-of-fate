@@ -8,6 +8,13 @@
 // toggle whether it can be rolled. Selection is in-memory only and resets to
 // "all enabled" on page reload (by design). Rolls draw only from enabled
 // items; guards keep at least one boots available so a roll never breaks.
+//
+// v3: adds per-subcategory weights for the "Others" pool (Accessories /
+// Support / Magical / Armor / Weapons / Armaments), each 0-200%, default
+// 100%, in-memory only. Others are drawn via weighted-random-without-
+// replacement instead of a flat pick. Boots/blinks are untouched — they stay
+// equal-chance. Weights apply on top of the existing per-item enable/disable
+// (a disabled item never rolls regardless of its category's weight).
 (function () {
   var BOOTS = [{n:"Phase Boots",s:"phase_boots"},{n:"Power Treads",s:"power_treads"},{n:"Boots of Travel",s:"travel_boots_2"},{n:"Boots of Bearing",s:"boots_of_bearing"},{n:"Guardian Greaves",s:"guardian_greaves"}];
   var BLINKS = [{n:"Swift Blink",s:"swift_blink"},{n:"Arcane Blink",s:"arcane_blink"},{n:"Overwhelming Blink",s:"overwhelming_blink"}];
@@ -16,6 +23,102 @@
   var SLUG_BY_NAME = {};
   function add(arr) { for (var i = 0; i < arr.length; i++) SLUG_BY_NAME[arr[i].n] = arr[i].s; }
   add(BOOTS); add(BLINKS); add(OTHERS);
+
+  // --- Subcategories for the "Others" pool ----------------------------------
+  // Assigned by primary function, matching the Dota 2 shop's broad item
+  // groupings as closely as makes sense for a flat list like this. Where an
+  // item straddles two groups (e.g. Kaya and Sange vs. Yasha and Kaya) the
+  // pick favors whichever stat reads as dominant — not meant to be
+  // authoritative, just a sensible default the user can re-balance via
+  // weights anyway.
+  var CATS = ['accessories', 'support', 'magical', 'armor', 'weapons', 'armaments'];
+  var CAT_LABELS = {
+    accessories: 'Аксесуари',
+    support: 'Підтримка',
+    magical: 'Магічні',
+    armor: 'Броня',
+    weapons: 'Зброя',
+    armaments: 'Спорядження'
+  };
+  var CAT_BY_NAME = {
+    // accessories
+    'Hand of Midas': 'accessories',
+    'Moon Shard': 'accessories',
+    'Consecrated Wraps': 'accessories',
+    // support
+    'Essence Distiller': 'support',
+    'Glimmer Cape': 'support',
+    'Holy Locket': 'support',
+    'Solar Crest': 'support',
+    'Spirit Vessel': 'support',
+    'Pipe of Insight': 'support',
+    'Aether Lens': 'support',
+    'Meteor Hammer': 'support',
+    'Wind Waker': 'support',
+    "Vladmir's Offering": 'support',
+    'Lotus Orb': 'support',
+    // magical
+    "Eul's Scepter": 'magical',
+    'Bloodstone': 'magical',
+    "Crella's Crozier": 'magical',
+    'Octarine Core': 'magical',
+    'Refresher Orb': 'magical',
+    'Ethereal Blade': 'magical',
+    'Scythe of Vyse': 'magical',
+    'Khanda': 'magical',
+    'Bloodthorn': 'magical',
+    'Dagon 5': 'magical',
+    'Aeon Disk': 'magical',
+    'Kaya and Sange': 'magical',
+    'Yasha and Kaya': 'magical',
+    // armor
+    'Blade Mail': 'armor',
+    'Crimson Guard': 'armor',
+    "Shiva's Guard": 'armor',
+    'Assault Cuirass': 'armor',
+    'Heart of Tarrasque': 'armor',
+    "Heaven's Halberd": 'armor',
+    // weapons
+    'Gleipnir': 'weapons',
+    'Armlet of Mordiggian': 'weapons',
+    'Mage Slayer': 'weapons',
+    "Revenant's Brooch": 'weapons',
+    'Desolator': 'weapons',
+    'Battle Fury': 'weapons',
+    'Nullifier': 'weapons',
+    'Manta Style': 'weapons',
+    'Radiance': 'weapons',
+    'Monkey King Bar': 'weapons',
+    'Satanic': 'weapons',
+    'Daedalus': 'weapons',
+    'Butterfly': 'weapons',
+    'Mjollnir': 'weapons',
+    'Divine Rapier': 'weapons',
+    'Silver Edge': 'weapons',
+    'Abyssal Blade': 'weapons',
+    'Sange and Yasha': 'weapons',
+    'Hurricane Pike': 'weapons',
+    'Harpoon': 'weapons',
+    "Hydra's Breath": 'weapons',
+    'Eye of Skadi': 'weapons',
+    'Disperser': 'weapons',
+    // armaments
+    'Black King Bar': 'armaments',
+    "Linken's Sphere": 'armaments',
+    'Helm of the Overlord': 'armaments',
+    'Aghanim Scepter': 'armaments',
+    'Parasma': 'armaments'
+  };
+  OTHERS.forEach(function (it) { it.c = CAT_BY_NAME[it.n] || 'accessories'; });
+  window.ITEM_CATEGORIES = CAT_BY_NAME;
+
+  // --- Category weights (0-200%, default 100) — in-memory only, like ENABLED
+  var CAT_WEIGHTS = {};
+  function resetWeights() {
+    CATS.forEach(function (cat) { CAT_WEIGHTS[cat] = 100; });
+  }
+  resetWeights();
+  window.CATEGORY_WEIGHTS = CAT_WEIGHTS;
 
   // Expose canonical item slugs to the app. The app resolves item icons from
   // dotaconstants first and uses these only as a fallback (e.g. "Eul's Scepter"
@@ -48,11 +151,39 @@
     return arr.filter(function (it) { return ENABLED[it.n]; });
   }
 
+  // Weighted pick-without-replacement over "Others": each remaining item's
+  // odds are proportional to its category's current weight. A category at
+  // 0% never gets picked (its items contribute 0 to the running total), same
+  // as if those items were individually disabled — if that empties the pool
+  // early we just return fewer, matching the existing under-fill behavior.
+  function pickWeightedOthers(pool, count) {
+    var remaining = pool.slice();
+    var picked = [];
+    while (picked.length < count && remaining.length) {
+      var total = 0;
+      var i;
+      for (i = 0; i < remaining.length; i++) {
+        total += Math.max(0, CAT_WEIGHTS[remaining[i].c] || 0);
+      }
+      if (total <= 0) break;
+      var r = Math.random() * total;
+      var idx = remaining.length - 1; // float-rounding safety fallback
+      for (i = 0; i < remaining.length; i++) {
+        var w = Math.max(0, CAT_WEIGHTS[remaining[i].c] || 0);
+        if (r < w) { idx = i; break; }
+        r -= w;
+      }
+      picked.push(remaining.splice(idx, 1)[0]);
+    }
+    return picked;
+  }
+
   // --- Roll: 1 boots + (0-1) blink + 4-5 others, no dupes, shuffled --------
   // Now draws only from ENABLED items. Guards:
   //  - if all boots are disabled, fall back to the full boots list (a roll
   //    must always contain exactly one boots), and flag it in the panel.
   //  - if enabled others can't fill 6 slots, the roll just returns fewer.
+  // Boots/blinks stay flat-random (untouched); only "Others" is weighted.
   function rollItems() {
     var slots = [];
 
@@ -66,10 +197,8 @@
     }
 
     var pool = enabledOf(OTHERS);
-    while (slots.length < 6 && pool.length) {
-      var idx = Math.floor(Math.random() * pool.length);
-      slots.push(pool.splice(idx, 1)[0].n);
-    }
+    var picked = pickWeightedOthers(pool, 6 - slots.length);
+    for (var p = 0; p < picked.length; p++) slots.push(picked[p].n);
 
     for (var i = slots.length - 1; i > 0; i--) {
       var j = Math.floor(Math.random() * (i + 1));
@@ -127,6 +256,39 @@
     '  box-shadow:0 0 0 1px rgba(200,170,120,0.1),inset 0 2px 8px rgba(10,5,30,0.45);',
     '  transition:transform .13s cubic-bezier(0.22,1,0.36,1),box-shadow .13s cubic-bezier(0.22,1,0.36,1);',
     '}',
+
+    '.wof-weights-section{',
+    '  padding-bottom:16px;margin-bottom:4px;',
+    '  border-bottom:1px solid rgba(200,170,120,0.14);',
+    '}',
+    '.wof-weights{display:flex;flex-direction:column;gap:11px;}',
+    '.wof-weight-row{',
+    '  display:grid;grid-template-columns:104px 1fr 46px;align-items:center;gap:12px;',
+    '}',
+    '.wof-weight-label{font-size:0.82rem;color:#cfc4ec;letter-spacing:0.02em;}',
+    '.wof-weight-val{',
+    '  font-size:0.78rem;color:#e9d8a6;text-align:right;',
+    '  font-variant-numeric:tabular-nums;',
+    '}',
+    '.wof-weight-slider{',
+    '  -webkit-appearance:none;appearance:none;width:100%;height:5px;border-radius:3px;',
+    '  background:linear-gradient(90deg,rgba(200,170,120,0.9) var(--wof-w-pct,50%),rgba(160,140,220,0.18) var(--wof-w-pct,50%));',
+    '  outline:none;cursor:pointer;',
+    '  transition:filter .2s cubic-bezier(0.22,1,0.36,1);',
+    '}',
+    '.wof-weight-slider:hover{filter:brightness(1.12);}',
+    '.wof-weight-slider::-webkit-slider-thumb{',
+    '  -webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;',
+    '  background:linear-gradient(180deg,#e9d8a6,#c8a95f);border:1px solid rgba(255,255,255,0.6);',
+    '  box-shadow:0 1px 4px rgba(0,0,0,0.5);',
+    '  transition:transform .2s cubic-bezier(0.22,1,0.36,1);',
+    '}',
+    '.wof-weight-slider::-webkit-slider-thumb:hover{transform:scale(1.15);}',
+    '.wof-weight-slider::-moz-range-thumb{',
+    '  width:14px;height:14px;border-radius:50%;border:1px solid rgba(255,255,255,0.6);',
+    '  background:linear-gradient(180deg,#e9d8a6,#c8a95f);box-shadow:0 1px 4px rgba(0,0,0,0.5);',
+    '}',
+    '.wof-weight-slider.zero{opacity:0.55;}',
 
     '.wof-overlay{',
     '  position:fixed;inset:0;z-index:100000;',
@@ -200,6 +362,26 @@
     '.wof-grid{',
     '  display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));',
     '  gap:8px;',
+    '}',
+
+    '.wof-subsection{',
+    '  margin-top:16px;',
+    '  animation:wofItemIn .4s cubic-bezier(0.22,1,0.36,1) backwards;',
+    '}',
+    '.wof-subsection:first-child{margin-top:0;}',
+    '.wof-subsection:nth-of-type(1){animation-delay:60ms;}',
+    '.wof-subsection:nth-of-type(2){animation-delay:105ms;}',
+    '.wof-subsection:nth-of-type(3){animation-delay:150ms;}',
+    '.wof-subsection:nth-of-type(4){animation-delay:195ms;}',
+    '.wof-subsection:nth-of-type(5){animation-delay:240ms;}',
+    '.wof-subsection:nth-of-type(6){animation-delay:285ms;}',
+    '.wof-subsection-title{',
+    '  display:flex;align-items:baseline;gap:4px;',
+    '  font-size:0.76rem;font-weight:600;letter-spacing:0.07em;text-transform:uppercase;',
+    '  color:#a89bd4;margin-bottom:8px;padding-left:1px;',
+    '}',
+    '.wof-subsection-count{',
+    '  color:#7a6aa8;font-weight:400;letter-spacing:0.02em;text-transform:none;',
     '}',
     '.wof-item{',
     '  position:relative;cursor:pointer;border-radius:8px;padding:6px 4px 5px;',
@@ -292,13 +474,33 @@
     return e;
   }
 
+  // Shared by makeSection and makeOthersSection: icon + name + check, toggling
+  // ENABLED[it.n] on click. Nothing about the cell itself changes here.
+  function makeItemCell(it) {
+    var cell = el('div', 'wof-item' + (ENABLED[it.n] ? '' : ' off'));
+    cell.setAttribute('data-name', it.n);
+    var ico = el('div', 'wof-ico');
+    ico.style.backgroundImage = "url('" + itemIconUrl(it.s) + "')";
+    var check = el('div', 'wof-check', '\u2713');
+    var name = el('div', 'wof-name', it.n);
+    cell.appendChild(ico);
+    cell.appendChild(check);
+    cell.appendChild(name);
+    cell.addEventListener('click', function () {
+      ENABLED[it.n] = !ENABLED[it.n];
+      cell.classList.toggle('off', !ENABLED[it.n]);
+      refreshFooter();
+    });
+    return cell;
+  }
+
   function makeSection(title, arr) {
     var sec = el('div', 'wof-section');
     var head = el('div', 'wof-section-head');
     head.appendChild(el('div', 'wof-section-title', title));
     var actions = el('div', 'wof-section-actions');
-    var allBtn = el('button', 'wof-mini', 'Усі');
-    var noneBtn = el('button', 'wof-mini', 'Жодного');
+    var allBtn = el('button', 'wof-mini', '\u0423\u0441\u0456');
+    var noneBtn = el('button', 'wof-mini', '\u0416\u043e\u0434\u043d\u043e\u0433\u043e');
     actions.appendChild(allBtn);
     actions.appendChild(noneBtn);
     head.appendChild(actions);
@@ -308,21 +510,7 @@
     sec.appendChild(grid);
 
     arr.forEach(function (it) {
-      var cell = el('div', 'wof-item' + (ENABLED[it.n] ? '' : ' off'));
-      cell.setAttribute('data-name', it.n);
-      var ico = el('div', 'wof-ico');
-      ico.style.backgroundImage = "url('" + itemIconUrl(it.s) + "')";
-      var check = el('div', 'wof-check', '\u2713');
-      var name = el('div', 'wof-name', it.n);
-      cell.appendChild(ico);
-      cell.appendChild(check);
-      cell.appendChild(name);
-      cell.addEventListener('click', function () {
-        ENABLED[it.n] = !ENABLED[it.n];
-        cell.classList.toggle('off', !ENABLED[it.n]);
-        refreshFooter();
-      });
-      grid.appendChild(cell);
+      grid.appendChild(makeItemCell(it));
     });
 
     allBtn.addEventListener('click', function () {
@@ -334,6 +522,124 @@
       arr.forEach(function (it) { ENABLED[it.n] = false; });
       Array.prototype.forEach.call(grid.children, function (c) { c.classList.add('off'); });
       refreshFooter();
+    });
+
+    return sec;
+  }
+
+  // Same "Others" pool as makeSection would render, but split into one
+  // subgrid per subcategory (in CATS order \u2014 the same order as the weight
+  // sliders above, so the eye can match a slider to its group of tiles). The
+  // overall "\u0423\u0441\u0456"/"\u0416\u043e\u0434\u043d\u043e\u0433\u043e" pair still governs every category together, same
+  // as before this change; that's simplest given the sliders already provide
+  // per-category control, and keeps one obvious "clear everything" action
+  // instead of six easy-to-miss per-subsection duplicates.
+  function makeOthersSection(title, arr) {
+    var sec = el('div', 'wof-section');
+    var head = el('div', 'wof-section-head');
+    head.appendChild(el('div', 'wof-section-title', title));
+    var actions = el('div', 'wof-section-actions');
+    var allBtn = el('button', 'wof-mini', '\u0423\u0441\u0456');
+    var noneBtn = el('button', 'wof-mini', '\u0416\u043e\u0434\u043d\u043e\u0433\u043e');
+    actions.appendChild(allBtn);
+    actions.appendChild(noneBtn);
+    head.appendChild(actions);
+    sec.appendChild(head);
+
+    var allCells = [];
+
+    CATS.forEach(function (cat) {
+      var itemsInCat = arr.filter(function (it) { return it.c === cat; });
+      if (!itemsInCat.length) return;
+
+      var sub = el('div', 'wof-subsection');
+      var subTitle = el('div', 'wof-subsection-title');
+      subTitle.appendChild(document.createTextNode(CAT_LABELS[cat]));
+      subTitle.appendChild(el('span', 'wof-subsection-count', ' \u00b7 ' + itemsInCat.length));
+      sub.appendChild(subTitle);
+
+      var grid = el('div', 'wof-grid');
+      sub.appendChild(grid);
+
+      itemsInCat.forEach(function (it) {
+        var cell = makeItemCell(it);
+        grid.appendChild(cell);
+        allCells.push(cell);
+      });
+
+      sec.appendChild(sub);
+    });
+
+    allBtn.addEventListener('click', function () {
+      arr.forEach(function (it) { ENABLED[it.n] = true; });
+      allCells.forEach(function (c) { c.classList.remove('off'); });
+      refreshFooter();
+    });
+    noneBtn.addEventListener('click', function () {
+      arr.forEach(function (it) { ENABLED[it.n] = false; });
+      allCells.forEach(function (c) { c.classList.add('off'); });
+      refreshFooter();
+    });
+
+    return sec;
+  }
+
+  // Six sliders (0-200%, step 10) controlling how often each "Others"
+  // subcategory is drawn. Purely a weighting knob on top of pickWeightedOthers
+  // — doesn't touch ENABLED, boots, or blinks.
+  function makeWeightsSection() {
+    var sec = el('div', 'wof-section wof-weights-section');
+    var head = el('div', 'wof-section-head');
+    head.appendChild(el('div', 'wof-section-title', 'Шанси категорій'));
+    var actions = el('div', 'wof-section-actions');
+    var resetBtn = el('button', 'wof-mini', 'Скинути ваги');
+    actions.appendChild(resetBtn);
+    head.appendChild(actions);
+    sec.appendChild(head);
+
+    var list = el('div', 'wof-weights');
+    sec.appendChild(list);
+
+    var rows = {};
+    CATS.forEach(function (cat) {
+      var row = el('div', 'wof-weight-row');
+      var label = el('div', 'wof-weight-label', CAT_LABELS[cat]);
+      var slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = '0';
+      slider.max = '200';
+      slider.step = '10';
+      slider.value = String(CAT_WEIGHTS[cat]);
+      slider.className = 'wof-weight-slider';
+      slider.setAttribute('aria-label', CAT_LABELS[cat] + ' — шанс випадіння');
+      var val = el('div', 'wof-weight-val', CAT_WEIGHTS[cat] + '%');
+
+      function syncSlider() {
+        var v = CAT_WEIGHTS[cat];
+        slider.style.setProperty('--wof-w-pct', (v / 200 * 100) + '%');
+        slider.classList.toggle('zero', v === 0);
+        val.textContent = v + '%';
+      }
+      syncSlider();
+
+      slider.addEventListener('input', function () {
+        CAT_WEIGHTS[cat] = parseInt(slider.value, 10);
+        syncSlider();
+      });
+
+      row.appendChild(label);
+      row.appendChild(slider);
+      row.appendChild(val);
+      list.appendChild(row);
+      rows[cat] = { slider: slider, sync: syncSlider };
+    });
+
+    resetBtn.addEventListener('click', function () {
+      resetWeights();
+      CATS.forEach(function (cat) {
+        rows[cat].slider.value = '100';
+        rows[cat].sync();
+      });
     });
 
     return sec;
@@ -384,7 +690,8 @@
     var body = el('div', 'wof-body');
     body.appendChild(makeSection('Черевики', BOOTS));
     body.appendChild(makeSection('Блінки', BLINKS));
-    body.appendChild(makeSection('Інші предмети', OTHERS));
+    body.appendChild(makeWeightsSection());
+    body.appendChild(makeOthersSection('Інші предмети', OTHERS));
 
     warnEl = el('div', 'wof-warn', '\u26a0 Усі черевики вимкнено — ролл усе одно візьме випадкові черевики, бо кожен набір потребує рівно одну пару.');
     body.appendChild(warnEl);
