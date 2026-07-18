@@ -320,7 +320,7 @@
     var lastT = t0;
     var maxSpeed = Math.abs(endAngle - startAngle) / (SPIN_DURATION * 0.12); // rough deg/ms near the fastest part
 
-    playWhoosh();
+    // playWhoosh(); // disabled: no whoosh on spin start — ticks/hum stay as-is
     startHum();
 
     function frame(now) {
@@ -344,7 +344,7 @@
 
       if (done) {
         stopHum(false);
-        playSeal();
+        // playSeal(); // disabled: no chime on hero landing — ticks/hum stay as-is
         rafId = 0;
         return;
       }
